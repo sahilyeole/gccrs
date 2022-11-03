@@ -29,6 +29,8 @@
 #include "print-tree.h"
 #include "fold-const.h"
 #include "langhooks.h"
+#include "rust-gcc.h"
+#include "rust-constexpr.h"
 
 #include "print-tree.h"
 
@@ -250,6 +252,7 @@ Intrinsics::compile (TyTy::FnType *fntype)
 
   tree builtin = error_mark_node;
   BuiltinsContext &builtin_ctx = BuiltinsContext::get ();
+
   if (builtin_ctx.lookup_simple_builtin (fntype->get_identifier (), &builtin))
     return builtin;
 
@@ -749,8 +752,7 @@ copy_handler_inner (Context *ctx, TyTy::FnType *fntype, bool overlaps)
     = build2 (MULT_EXPR, size_type_node, TYPE_SIZE_UNIT (param_type), count);
 
   tree memcpy_raw = nullptr;
-  BuiltinsContext::get ().lookup_simple_builtin (overlaps ? "memmove"
-							  : "memcpy",
+  BuiltinsContext::get ().lookup_simple_builtin (overlaps ? "__builtin_memmove" : "__builtin_memcpy",
 						 &memcpy_raw);
   rust_assert (memcpy_raw);
   auto memcpy = build_fold_addr_expr_loc (UNKNOWN_LOCATION, memcpy_raw);
@@ -796,19 +798,36 @@ prefetch_data_handler (Context *ctx, TyTy::FnType *fntype, Prefetch kind)
 
   enter_intrinsic_block (ctx, fndecl);
 
-  auto addr = Backend::var_expression (args[0], UNDEF_LOCATION);
-  auto locality = Backend::var_expression (args[1], UNDEF_LOCATION);
-  auto rw_flag = make_unsigned_long_tree (kind == Prefetch::Write ? 1 : 0);
+  auto addr = ctx->get_backend ()->var_expression (args[0], Location ());
+
+  // The core library technically allows you to pass any i32 value as a
+  // locality, but LLVM will then complain if the value cannot be constant
+  // evaluated. For now, we ignore the locality argument and instead always
+  // pass `3` (the most restrictive value). This allows us to still have
+  // prefetch behavior, just not as granular as expected. In future Rust
+  // versions, we hope that prefetch intrinsics will be split up according to
+  // locality, similarly to atomic intrinsics.
+  // The solution is to try and perform constant folding for the locality
+  // argument, or instead of creating a new function definition, modify the call
+  // site directly This has the bad side-effect of creating warnings about
+  // `unused name - locality`, which we hack away here:
+  // TODO: Take care of handling locality properly
+  ctx->get_backend ()->var_expression (args[1], Location ());
+
+  auto rw_flag = make_unsigned_long_tree (ctx, kind == Prefetch::Write ? 1 : 0);
 
   auto prefetch_raw = NULL_TREE;
-  auto ok
-    = BuiltinsContext::get ().lookup_simple_builtin ("prefetch", &prefetch_raw);
+  auto ok = BuiltinsContext::get ().lookup_simple_builtin ("__builtin_prefetch",
+							   &prefetch_raw);
   rust_assert (ok);
   auto prefetch = build_fold_addr_expr_loc (UNKNOWN_LOCATION, prefetch_raw);
 
   auto prefetch_call
-    = Backend::call_expression (prefetch, {addr, rw_flag, locality}, nullptr,
-				UNDEF_LOCATION);
+    = ctx->get_backend ()->call_expression (prefetch,
+					    {addr, rw_flag,
+					     // locality arg
+					     make_unsigned_long_tree (ctx, 3)},
+					    nullptr, Location ());
 
   TREE_READONLY (prefetch_call) = 0;
   TREE_SIDE_EFFECTS (prefetch_call) = 1;
@@ -833,13 +852,20 @@ build_atomic_builtin_name (const std::string &prefix, location_t locus,
   // TODO: Can we maybe get the generic version (atomic_store_n) to work... This
   // would be so much better
 
-  std::string result = prefix;
+  std::string result = "__" + prefix; //  + "n";
 
   auto type_name = operand_type->get_name ();
   if (type_name == "usize" || type_name == "isize")
     {
       rust_sorry_at (
 	locus, "atomics are not yet available for size types (usize, isize)");
+      return "";
+    }
+
+  if (type_name.at (0) == 'i')
+    {
+      rust_sorry_at (locus, "atomics are not yet supported for signed "
+			    "integer types (i8, i16, i32, i64, i128)");
       return "";
     }
 
@@ -970,6 +996,7 @@ atomic_load_handler_inner (Context *ctx, TyTy::FnType *fntype, int ordering)
   TREE_SIDE_EFFECTS (load_call) = 1;
 
   ctx->add_statement (return_statement);
+
   finalize_intrinsic_block (ctx, fndecl);
 
   return fndecl;
