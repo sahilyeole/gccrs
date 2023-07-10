@@ -16,6 +16,7 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
+#include "rust-system.h"
 #include "rust-token.h"
 #include "rust-diagnostics.h"
 
@@ -172,6 +173,54 @@ Token::get_str () const
   return *str;
 }
 
+static std::string
+escape_special_chars (const std::string &source, bool in_string = false)
+{
+  std::stringstream ss;
+  for (char c : source)
+    {
+      switch (c)
+	{
+	case '\t':
+	  ss << "\\t";
+	  break;
+	case '\n':
+	  ss << "\\n";
+	  break;
+	case '\r':
+	  ss << "\\r";
+	  break;
+	case '\0':
+	  ss << "\\0";
+	  break;
+	case '\\':
+	  ss << "\\\\";
+	  break;
+	case '\v':
+	  ss << "\\v";
+	  break;
+	case '\'':
+	  if (in_string)
+	    ss << c;
+	  else
+	    ss << "\\'";
+	  break;
+	case '"':
+	  if (in_string)
+	    ss << "\\\"";
+	  else
+	    ss << c;
+	  break;
+	// Should we also replace unicode escape or \x digits ?
+	default:
+	  ss << c;
+	  break;
+	}
+    }
+
+  return ss.str ();
+}
+
 std::string
 Token::as_string () const
 {
@@ -180,13 +229,13 @@ Token::as_string () const
       switch (get_id ())
 	{
 	case STRING_LITERAL:
-	  return "\"" + get_str () + "\"";
+	  return "\"" + escape_special_chars (get_str (), true) + "\"";
 	case BYTE_STRING_LITERAL:
-	  return "b\"" + get_str () + "\"";
+	  return "b\"" + escape_special_chars (get_str (), true) + "\"";
 	case CHAR_LITERAL:
-	  return "'" + get_str () + "'";
+	  return "'" + escape_special_chars (get_str ()) + "'";
 	case BYTE_CHAR_LITERAL:
-	  return "b'" + get_str () + "'";
+	  return "b'" + escape_special_chars (get_str ()) + "'";
 	case LIFETIME:
 	  return "'" + get_str ();
 	case INT_LITERAL:
