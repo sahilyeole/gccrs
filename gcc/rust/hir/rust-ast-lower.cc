@@ -336,24 +336,108 @@ ASTLoweringExprWithBlock::visit (AST::WhileLoopExpr &expr)
 void
 ASTLoweringExprWithBlock::visit (AST::ForLoopExpr &expr)
 {
-  // TODO FIXME
+  // This desugars into:
+  //
+  // {
+  //   let iterator = method-call-expr<iterator_expr, into_iter> ();
+  //   LoopExpr
+  //   {
+  //     match (iterator.next ())
+  //     {
+  //        lang-item(Some(<loop_pattern>)) => <loop_block>
+  //        lang-item(None) => break;
+  //     }
+  //   }
+  // }
 
-  // HIR::BlockExpr *loop_block
-  //   = ASTLoweringBlock::translate (expr.get_loop_block ().get (),
-  //   &terminated);
-  // HIR::LoopLabel loop_label = lower_loop_label (expr.get_loop_label ());
-  // HIR::Expr *iterator_expr
-  //   = ASTLoweringExpr::translate (expr.get_iterator_expr ().get (),
-  //       			  &terminated);
-  // HIR::Pattern *loop_pattern
-  //   = ASTLoweringPattern::translate (expr.get_pattern ().get ());
+  auto crate_num = mappings->get_current_crate ();
+  std::vector<std::unique_ptr<Stmt>> block_statements;
 
-  // auto crate_num = mappings->get_current_crate ();
-  // Analysis::NodeMapping mapping (crate_num, expr.get_node_id (),
-  //       			 mappings->get_next_hir_id (crate_num),
-  //       			 UNKNOWN_LOCAL_DEFID);
+  HIR::BlockExpr *loop_exec_block
+    = ASTLoweringBlock::translate (expr.get_loop_block ().get (), &terminated);
+  HIR::LoopLabel loop_label = lower_loop_label (expr.get_loop_label ());
+  HIR::Expr *iterator_expr
+    = ASTLoweringExpr::translate (expr.get_iterator_expr ().get (),
+				  &terminated);
+  HIR::Pattern *loop_pattern
+    = ASTLoweringPattern::translate (expr.get_pattern ().get ());
 
-  gcc_unreachable ();
+  // generate implicit let iterator = method_call_expr
+  HIR::Expr *iter_init = new HIR::MethodCallExpr (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    std::unique_ptr<HIR::Expr> (iterator_expr),
+    HIR::PathExprSegment (
+      Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			     mappings->get_next_hir_id (crate_num),
+			     UNKNOWN_LOCAL_DEFID),
+      HIR::PathIdentSegment ("into_iter"), iterator_expr->get_locus (),
+      HIR::GenericArgs::create_empty ()),
+    {} /*params*/, {} /*outer_attribs*/, iterator_expr->get_locus ());
+
+  HIR::IdentifierPattern *implicit_iter_pattern = new HIR::IdentifierPattern (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    Identifier ("__grs_iter__"), iterator_expr->get_locus ());
+  HIR::LetStmt *let = new HIR::LetStmt (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    std::unique_ptr<HIR::Pattern> (implicit_iter_pattern),
+    std::unique_ptr<HIR::Expr> (iter_init),
+    std::unique_ptr<HIR::Type> (nullptr), {}, expr.get_locus ());
+  block_statements.push_back (std::unique_ptr<HIR::Stmt> (let));
+
+  // create loop_match_expr
+  HIR::Expr *iter_next_receiver = nullptr;
+  HIR::Expr *iter_next = new HIR::MethodCallExpr (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    std::unique_ptr<HIR::Expr> (iter_next_receiver),
+    HIR::PathExprSegment (
+      Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			     mappings->get_next_hir_id (crate_num),
+			     UNKNOWN_LOCAL_DEFID),
+      HIR::PathIdentSegment ("next"), iterator_expr->get_locus (),
+      HIR::GenericArgs::create_empty ()),
+    {} /*params*/, {} /*outer_attribs*/, iterator_expr->get_locus ());
+  HIR::MatchExpr *match_expr = nullptr;
+
+  // create LoopExpr
+  location_t start_locus = expr.get_locus ();
+  location_t end_locus = loop_exec_block->get_end_locus ();
+  HIR::BlockExpr *loop_block_expr = new HIR::BlockExpr (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    {}, std::unique_ptr<HIR::Expr> (match_expr), true, {}, {}, start_locus,
+    end_locus);
+  HIR::LoopExpr *loop_expr = new HIR::LoopExpr (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    std::unique_ptr<HIR::BlockExpr> (loop_block_expr), expr.get_locus (),
+    std::move (loop_label), expr.get_outer_attrs ());
+
+  // create loop expr stmt and add to block_statements
+  HIR::ExprStmt *loop_expr_stmt = new HIR::ExprStmt (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    std::unique_ptr<HIR::Expr> (loop_expr), loop_exec_block->get_locus (),
+    true /*must be unit*/);
+  block_statements.push_back (std::unique_ptr<HIR::Stmt> (loop_expr_stmt));
+
+  // create wrapper block expr
+  translated = new HIR::BlockExpr (
+    Analysis::NodeMapping (crate_num, mappings->get_next_node_id (),
+			   mappings->get_next_hir_id (crate_num),
+			   UNKNOWN_LOCAL_DEFID),
+    std::move (block_statements), std::unique_ptr<HIR::Expr> (loop_expr), true,
+    {}, {}, start_locus, end_locus);
 }
 
 void
