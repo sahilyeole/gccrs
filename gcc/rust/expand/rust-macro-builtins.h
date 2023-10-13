@@ -121,6 +121,9 @@ public:
   static std::unordered_map<std::string, AST::MacroTranscriberFunc>
     builtin_transcribers;
 
+  static tl::optional<std::vector<std::unique_ptr<AST::Token>>>
+  make_tokens_from_string (std::string &data, location_t invoc_locas);
+
   static tl::optional<AST::Fragment>
   assert_handler (location_t invoc_locus, AST::MacroInvocData &invoc);
 

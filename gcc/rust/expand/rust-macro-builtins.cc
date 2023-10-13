@@ -398,13 +398,202 @@ load_file_bytes (location_t invoc_locus, const char *filename)
 }
 } // namespace
 
+tl::optional<std::vector<std::unique_ptr<AST::Token>>>
+MacroBuiltin::make_tokens_from_string (std::string &data,
+				       location_t invoc_locas)
+{
+  Lexer lex (data, Session::get_instance ().linemap);
+
+  std::vector<std::unique_ptr<AST::Token>> tokens;
+  TokenPtr ptr;
+  for (ptr = lex.build_token ();
+       ptr != nullptr && ptr->get_id () != END_OF_FILE;
+       ptr = lex.build_token ())
+    {
+      tokens.emplace_back (make_token (ptr));
+    }
+
+  if (ptr == nullptr)
+    {
+      return tl::nullopt;
+    }
+  return tokens;
+}
+
 tl::optional<AST::Fragment>
 MacroBuiltin::assert_handler (location_t invoc_locus,
 			      AST::MacroInvocData &invoc)
 {
-  rust_debug ("assert!() called");
+  auto restrictions = Rust::ParseRestrictions ();
 
-  return AST::Fragment::create_error ();
+  // stop parsing when encountered a braces/brackets
+  restrictions.expr_can_be_null = true;
+
+  auto invoc_token_tree = invoc.get_delim_tok_tree ();
+
+  MacroInvocLexer lex (invoc_token_tree.to_token_stream ());
+  Parser<MacroInvocLexer> parser (lex);
+
+  auto last_token_id = macro_end_token (invoc_token_tree, parser);
+
+  if (parser.peek_current_token ()->get_id () == last_token_id)
+    rust_error_at (invoc_locus, "macro takes 1 argument");
+
+  auto expr = parser.parse_expr (AST::AttrVec (), restrictions);
+  rust_assert (expr);
+
+  // auto current_file
+  //   = Session::get_instance ().linemap->location_file (invoc_locus);
+
+  // if <expr> { panic ( );}
+  // std::vector<std::unique_ptr<AST::Token>>
+  // auto tokens_opt = make_tokens_from_string("if <expr> { ", invoc_locus);
+  // rust_assert (token);
+  // auto tokens = tokens_opt.take ();
+
+  // FIXME: Insert location pointing to call site in tokens
+  std::vector<std::unique_ptr<AST::Token>> tokens;
+  tokens.push_back (make_token (Token::make (TokenId::IF, invoc_locus)));
+
+  auto orig_tokens = invoc_token_tree.to_token_stream ();
+  tokens.insert (tokens.end (), std::make_move_iterator (orig_tokens.begin ()),
+		 std::make_move_iterator (orig_tokens.end ()));
+  // tokens.push_back (invoc_token_tree.to_token_stream ());
+  // copy tokens?
+  //
+  std::string body ("{ abort(); }");
+  auto footer_tokens_opt = make_tokens_from_string (body, invoc_locus);
+  rust_assert (footer_tokens_opt);
+  // auto footer_tokens = *footer_tokens_opt;
+  tokens.insert (tokens.end (),
+		 std::make_move_iterator (footer_tokens_opt.value ().begin ()),
+		 std::make_move_iterator (footer_tokens_opt.value ().end ()));
+
+  // tokens.push_back (
+  //   make_token (Token::make_identifier (invoc_locus, std::string
+  //   ("panic"))));
+  // tokens.push_back (make_token (Token::make (TokenId::EXCLAM, invoc_locus)));
+  // tokens.push_back (
+  //   make_token (Token::make (TokenId::LEFT_PAREN, invoc_locus)));
+  // tokens.push_back (
+  //   make_token (Token::make (TokenId::RIGHT_PAREN, invoc_locus)));
+  // tokens.push_back (make_token (Token::make (TokenId::SEMICOLON,
+  // invoc_locus)));
+
+  // auto str_token
+  //   = make_token (Token::make_string (invoc_locus, std::move
+  //   (current_file)));
+
+  // auto token = make_token (
+  //   Token::make_int (invoc_locus, std::to_string (0)));
+
+  std::vector<std::unique_ptr<AST::Stmt>> stmts;
+
+  // Should be panic!()
+  // stmts.push_back (std::unique_ptr<AST::Stmt> (new
+  // AST::EmptyStmt(invoc_locus)));
+  // auto path_str = make_macro_path_str (BuiltinMacro::Panic);
+
+  std::vector<AST::PathExprSegment> segment
+    = {AST::PathExprSegment (AST::PathIdentSegment ("abort", invoc_locus),
+			     invoc_locus)}; // ["panic"]
+  auto pie = std::unique_ptr<AST::Expr> (
+    new AST::PathInExpression (std::move (segment), {}, invoc_locus));
+
+  auto path_str = make_macro_path_str (BuiltinMacro::Panic);
+  // Unsafe call to abort function
+  // auto call_expr = std::unique_ptr<AST::Expr> (new AST::CallExpr (std::move
+  // (pie), {}, {}, invoc_locus));
+  auto call_expr = std::unique_ptr<AST::Expr> (
+    new AST::CallExpr (std::move (pie), {}, {}, invoc_locus));
+  // auto call_stmt = std::unique_ptr<AST::Stmt> (new AST::ExprStmt
+  // (std::move(call_expr), invoc_locus, true));
+
+  // std::vector<std::unique_ptr<AST::ExprStmt>> stmts_for_block;
+  // auto stmt_bla = std::unique_ptr<AST::ExprStmt> (new AST::ExprStmt
+  // (std::move(call_expr), invoc_locus, true)); stmts_for_block.push_back
+  // (std::move (stmt_bla));
+
+  std::vector<std::unique_ptr<AST::Stmt>> stmts_for_block;
+  stmts_for_block.push_back (std::unique_ptr<AST::ExprStmt> (
+    new AST::ExprStmt (std::move (call_expr), invoc_locus, true)));
+  auto block_expr = std::unique_ptr<AST::BlockExpr> (
+    new AST::BlockExpr (std::move (stmts_for_block),
+			//{},
+			// stmts_for_block, /* Block_statements */
+			{}, /* block_expr */
+			{}, /* inner_attribs */
+			{}, /* outer_attribs */
+			invoc_locus, invoc_locus));
+  // auto unsafe_block_expr = std::unique_ptr <AST::Expr> (new
+  // AST::UnsafeBlockExpr (std::move (block_expr), {}, invoc_locus)); auto
+  // exprstmt_panic = std::unique_ptr<AST::ExprStmt> (new AST::ExprStmt
+  // (std::move(unsafe_block_expr), invoc_locus, true));
+  auto exprstmt_panic = std::unique_ptr<AST::ExprStmt> (
+    new AST::ExprStmt (std::move (block_expr), invoc_locus, true));
+  // Regular Call to the abort function
+  // auto callexpr_panic = std::unique_ptr<AST::Expr> (
+  // 	new AST::CallExpr (std::move (pie), {}, {}, invoc_locus));
+  // auto exprstmt_panic = std::unique_ptr<AST::ExprStmt> (new AST::ExprStmt
+  // (std::move(callexpr_panic), invoc_locus, true));
+
+  // Macro call [not working]
+  // auto panic_macro_invoc =
+  //   std::unique_ptr<AST::Expr> (
+  //     AST::MacroInvocation::Builtin (
+  //       BuiltinMacro::Panic,
+  //       AST::MacroInvocData (AST::SimplePath ({AST::SimplePathSegment (
+  // 	       path_str, invoc_locus)}),
+  // 	 std::move (invoc_token_tree)),
+  //       {}, invoc_locus, {}));
+  // auto exprstmt_panic = std::unique_ptr<AST::ExprStmt> (new AST::ExprStmt
+  // (std::move(panic_macro_invoc), invoc_locus, true));
+
+  stmts.push_back (std::move (exprstmt_panic));
+
+  // AST::MacroInvocation::Builtin (
+
+  // 	// FIXME: creating panic!() macro invocation
+  // 	AST::MacroInvocData (
+  // 	  AST::SimplePath ({AST::SimplePathSegment (path_str, invoc_locus)}),
+  // 	  std::move (invoc_token_tree)),
+  // 	{}, invoc_locus,
+  // 	std::vector<std::unique_ptr<AST::MacroInvocation>> ()))
+  // invoc_locus);
+
+  auto if_cond = std::unique_ptr<AST::Expr> (
+    new AST::NegationExpr (std::move (expr), NegationOperator::NOT, {},
+			   invoc_locus));
+  auto if_block = std::unique_ptr<AST::BlockExpr> (
+    new AST::BlockExpr (std::move (stmts), /* block_statements */
+			{},		   /* block_expr */
+			{},		   /* inner_attribs */
+			{},		   /* outer_attribs */
+			invoc_locus, invoc_locus));
+
+  auto if_expr = std::unique_ptr<AST::ExprWithBlock> (
+    new AST::IfExpr (std::move (if_cond), std::move (if_block),
+		     {} /* outer_attrs */, invoc_locus));
+
+  auto node = AST::SingleASTNode (std::unique_ptr<AST::ExprStmt> (
+    new AST::ExprStmt (std::move (if_expr), invoc_locus, false)));
+
+  // auto node = AST::SingleASTNode (
+  //   std::unique_ptr<AST::Expr> (
+  //     new AST::BlockExpr(
+  // 	{}, // statements
+
+  // 	if_ptr,
+  // 	{}, // inner_attribs
+  // 	{}, // outer_attribs
+  // 	invoc_locus,
+  // 	invoc_locus)));
+
+  // auto column_no = AST::SingleASTNode (std::unique_ptr<AST::Expr> (
+  //   new AST::LiteralExpr (std::to_string (3), AST::Literal::INT,
+  // 			  PrimitiveCoreType::CORETYPE_U32, {}, invoc_locus)));
+
+  return AST::Fragment ({node}, std::move (tokens));
 }
 
 tl::optional<AST::Fragment>
