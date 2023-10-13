@@ -16,6 +16,7 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
+#include "backend/rust-builtins.h"
 #include "rust-diagnostics.h"
 #include "config.h"
 #include "system.h"
@@ -105,6 +106,8 @@ grs_langhook_init (void)
    built-in functions. The parameter (signed_char = false) specifies
    whether char is signed.  */
   build_common_tree_nodes (false);
+
+  Rust::Compile::BuiltinsContext::get ();
 
   // Builds built-ins for middle-end after all front-end built-ins are already
   // instantiated
@@ -383,6 +386,8 @@ rust_localize_identifier (const char *ident)
   return identifier_to_locale (ident);
 }
 
+extern const attribute_spec grs_langhook_common_attribute_table[];
+
 /* The language hooks data structure. This is the main interface between the GCC
  * front-end and the GCC middle-end/back-end. A list of language hooks could be
  * found in <gcc>/langhooks.h
@@ -403,6 +408,8 @@ rust_localize_identifier (const char *ident)
 #undef LANG_HOOKS_GIMPLIFY_EXPR
 #undef LANG_HOOKS_EH_PERSONALITY
 
+#undef LANG_HOOKS_COMMON_ATTRIBUTE_TABLE
+
 #define LANG_HOOKS_NAME "GNU Rust"
 #define LANG_HOOKS_INIT grs_langhook_init
 #define LANG_HOOKS_OPTION_LANG_MASK grs_langhook_option_lang_mask
@@ -422,6 +429,10 @@ rust_localize_identifier (const char *ident)
 #define LANG_HOOKS_GETDECLS grs_langhook_getdecls
 #define LANG_HOOKS_GIMPLIFY_EXPR grs_langhook_gimplify_expr
 #define LANG_HOOKS_EH_PERSONALITY grs_langhook_eh_personality
+
+#define LANG_HOOKS_COMMON_ATTRIBUTE_TABLE grs_langhook_common_attribute_table
+
+
 
 #if CHECKING_P
 
